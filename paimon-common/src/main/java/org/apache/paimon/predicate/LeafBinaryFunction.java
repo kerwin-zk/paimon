@@ -20,36 +20,24 @@ package org.apache.paimon.predicate;
 
 import org.apache.paimon.types.DataType;
 
-import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.annotation.JsonCreator;
-
 import java.util.List;
-import java.util.Optional;
 
-import static org.apache.paimon.predicate.CompareUtils.compareLiteral;
-
-/** A {@link LeafFunction} to eval in. */
-public class In extends LeafNAryFunction {
+/** Function to test a field with a literal. */
+public abstract class LeafBinaryFunction extends LeafFunction {
 
     private static final long serialVersionUID = 1L;
 
-    public static final String NAME = "IN";
+    public abstract boolean test(DataType type, Object field, Object literal);
 
-    public static final In INSTANCE = new In();
-
-    @JsonCreator
-    private In() {}
+    public abstract boolean test(
+            DataType type, long rowCount, Object min, Object max, Long nullCount, Object literal);
 
     @Override
     public boolean test(DataType type, Object field, List<Object> literals) {
-        if (field == null) {
+        if (field == null || literals.get(0) == null) {
             return false;
         }
-        for (Object literal : literals) {
-            if (literal != null && compareLiteral(type, literal, field) == 0) {
-                return true;
-            }
-        }
-        return false;
+        return test(type, field, literals.get(0));
     }
 
     @Override
@@ -60,31 +48,11 @@ public class In extends LeafNAryFunction {
             Object max,
             Long nullCount,
             List<Object> literals) {
-        if (nullCount != null && rowCount == nullCount) {
-            return false;
-        }
-        for (Object literal : literals) {
-            if (literal != null
-                    && compareLiteral(type, literal, min) >= 0
-                    && compareLiteral(type, literal, max) <= 0) {
-                return true;
+        if (nullCount != null) {
+            if (rowCount == nullCount || literals.get(0) == null) {
+                return false;
             }
         }
-        return false;
-    }
-
-    @Override
-    public Optional<LeafFunction> negate() {
-        return Optional.of(NotIn.INSTANCE);
-    }
-
-    @Override
-    public <T> T visit(FunctionVisitor<T> visitor, FieldRef fieldRef, List<Object> literals) {
-        return visitor.visitIn(fieldRef, literals);
-    }
-
-    @Override
-    public String toJson() {
-        return NAME;
+        return test(type, rowCount, min, max, nullCount, literals.get(0));
     }
 }

@@ -27,29 +27,22 @@ import java.util.Optional;
 
 import static org.apache.paimon.predicate.CompareUtils.compareLiteral;
 
-/** A {@link LeafFunction} to eval in. */
-public class In extends LeafNAryFunction {
+/** The {@link LeafFunction} to eval between. */
+public class Between extends LeafTernaryFunction {
 
     private static final long serialVersionUID = 1L;
 
-    public static final String NAME = "IN";
+    public static final String NAME = "BETWEEN";
 
-    public static final In INSTANCE = new In();
+    public static final Between INSTANCE = new Between();
 
     @JsonCreator
-    private In() {}
+    public Between() {}
 
     @Override
-    public boolean test(DataType type, Object field, List<Object> literals) {
-        if (field == null) {
-            return false;
-        }
-        for (Object literal : literals) {
-            if (literal != null && compareLiteral(type, literal, field) == 0) {
-                return true;
-            }
-        }
-        return false;
+    public boolean test(DataType type, Object field, Object literal1, Object literal2) {
+        return compareLiteral(type, literal1, field) <= 0
+                && compareLiteral(type, literal2, field) >= 0;
     }
 
     @Override
@@ -59,28 +52,20 @@ public class In extends LeafNAryFunction {
             Object min,
             Object max,
             Long nullCount,
-            List<Object> literals) {
-        if (nullCount != null && rowCount == nullCount) {
-            return false;
-        }
-        for (Object literal : literals) {
-            if (literal != null
-                    && compareLiteral(type, literal, min) >= 0
-                    && compareLiteral(type, literal, max) <= 0) {
-                return true;
-            }
-        }
-        return false;
+            Object literal1,
+            Object literal2) {
+        // true if [min, max] and [l(0), l(1)] have intersection
+        return compareLiteral(type, literal1, max) <= 0 && compareLiteral(type, literal2, min) >= 0;
     }
 
     @Override
     public Optional<LeafFunction> negate() {
-        return Optional.of(NotIn.INSTANCE);
+        return Optional.of(NotBetween.INSTANCE);
     }
 
     @Override
     public <T> T visit(FunctionVisitor<T> visitor, FieldRef fieldRef, List<Object> literals) {
-        return visitor.visitIn(fieldRef, literals);
+        return visitor.visitBetween(fieldRef, literals.get(0), literals.get(1));
     }
 
     @Override
