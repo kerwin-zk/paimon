@@ -381,6 +381,7 @@ public class FileStoreCommitImpl implements FileStoreCommit {
             long commitDuration,
             int generatedSnapshots,
             int attempts) {
+        Long latestSnapshotId = snapshotManager.latestSnapshotId();
         CommitStats commitStats =
                 new CommitStats(
                         appendTableFiles,
@@ -389,7 +390,8 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                         compactChangelogFiles,
                         commitDuration,
                         generatedSnapshots,
-                        attempts);
+                        attempts,
+                        latestSnapshotId == null ? 0L : latestSnapshotId);
         commitMetrics.reportCommit(commitStats);
     }
 

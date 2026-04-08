@@ -77,6 +77,11 @@ Below is lists of Paimon built-in metrics. They are summarized into types of sca
             <td>Gauge</td>
             <td>Resulted table files in the last scan.</td>
         </tr>
+        <tr>
+            <td>lastScannedSnapshotId</td>
+            <td>Gauge</td>
+            <td>The snapshot ID scanned in the last scan.</td>
+        </tr>
     </tbody>
 </table>
 
@@ -180,6 +185,11 @@ Below is lists of Paimon built-in metrics. They are summarized into types of sca
             <td>lastCompactionOutputFileSize</td>
             <td>Gauge</td>
             <td>Total size of the output files for the last compaction.</td>
+        </tr>
+        <tr>
+            <td>lastCommittedSnapshotId</td>
+            <td>Gauge</td>
+            <td>The snapshot ID produced by the last commit.</td>
         </tr>
     </tbody>
 </table>
