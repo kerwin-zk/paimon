@@ -19,19 +19,28 @@
 package org.apache.paimon.table.system;
 
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.Timestamp;
+import org.apache.paimon.data.serializer.InternalRowSerializer;
 import org.apache.paimon.manifest.ManifestCommittable;
+import org.apache.paimon.predicate.Predicate;
+import org.apache.paimon.predicate.PredicateBuilder;
+import org.apache.paimon.reader.RecordReader;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.Table;
 import org.apache.paimon.table.TableTestBase;
 import org.apache.paimon.table.sink.TableCommitImpl;
+import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.types.DataTypes;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -89,5 +98,71 @@ class BranchesTableTest extends TableTestBase {
                                 .map(v -> v.getString(0).toString())
                                 .collect(Collectors.toList()))
                 .containsExactlyInAnyOrder("my_branch1", "my_branch2", "my_branch3");
+    }
+
+    @Test
+    void testFilterByBranchNameEqual() throws Exception {
+        table.createBranch("my_branch1", "2023-07-17");
+        table.createBranch("my_branch2", "2023-07-18");
+        table.createBranch("my_branch3", "2023-07-18");
+        PredicateBuilder builder = new PredicateBuilder(BranchesTable.TABLE_TYPE);
+        Predicate predicate = builder.equal(0, BinaryString.fromString("my_branch1"));
+        List<InternalRow> result = readWithFilter(branchesTable, predicate);
+        assertThat(result.size()).isEqualTo(1);
+        assertThat(result.get(0).getString(0).toString()).isEqualTo("my_branch1");
+    }
+
+    @Test
+    void testFilterByBranchNameEqualNoMatch() throws Exception {
+        table.createBranch("my_branch1", "2023-07-17");
+        PredicateBuilder builder = new PredicateBuilder(BranchesTable.TABLE_TYPE);
+        Predicate predicate = builder.equal(0, BinaryString.fromString("non_existent"));
+        List<InternalRow> result = readWithFilter(branchesTable, predicate);
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void testFilterByBranchNameIn() throws Exception {
+        table.createBranch("my_branch1", "2023-07-17");
+        table.createBranch("my_branch2", "2023-07-18");
+        table.createBranch("my_branch3", "2023-07-18");
+        PredicateBuilder builder = new PredicateBuilder(BranchesTable.TABLE_TYPE);
+        Predicate predicate =
+                builder.in(
+                        0,
+                        Arrays.asList(
+                                BinaryString.fromString("my_branch1"),
+                                BinaryString.fromString("my_branch3")));
+        List<InternalRow> result = readWithFilter(branchesTable, predicate);
+        assertThat(result.size()).isEqualTo(2);
+        assertThat(
+                        result.stream()
+                                .map(v -> v.getString(0).toString())
+                                .collect(Collectors.toList()))
+                .containsExactlyInAnyOrder("my_branch1", "my_branch3");
+    }
+
+    @Test
+    void testFilterByBranchNameInNoMatch() throws Exception {
+        table.createBranch("my_branch1", "2023-07-17");
+        PredicateBuilder builder = new PredicateBuilder(BranchesTable.TABLE_TYPE);
+        Predicate predicate =
+                builder.in(
+                        0,
+                        Arrays.asList(
+                                BinaryString.fromString("non_existent1"),
+                                BinaryString.fromString("non_existent2")));
+        List<InternalRow> result = readWithFilter(branchesTable, predicate);
+        assertThat(result).isEmpty();
+    }
+
+    private List<InternalRow> readWithFilter(Table table, Predicate predicate) throws Exception {
+        ReadBuilder readBuilder = table.newReadBuilder().withFilter(predicate);
+        RecordReader<InternalRow> reader =
+                readBuilder.newRead().createReader(readBuilder.newScan().plan());
+        InternalRowSerializer serializer = new InternalRowSerializer(table.rowType());
+        List<InternalRow> rows = new ArrayList<>();
+        reader.forEachRemaining(row -> rows.add(serializer.copy(row)));
+        return rows;
     }
 }

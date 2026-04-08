@@ -232,14 +232,13 @@ public class TagsTable implements ReadonlyTable {
             TagManager tagManager = new TagManager(fileIO, location, branch);
 
             Map<String, Tag> nameToSnapshot = new TreeMap<>();
-            Map<String, Tag> predicateMap = new TreeMap<>();
             if (predicate != null) {
                 if (predicate instanceof LeafPredicate
                         && ((LeafPredicate) predicate).function() instanceof Equal
                         && ((LeafPredicate) predicate).literals().get(0) instanceof BinaryString
                         && predicate.visit(LeafPredicateExtractor.INSTANCE).get(TAG_NAME) != null) {
                     String equalValue = ((LeafPredicate) predicate).literals().get(0).toString();
-                    tagManager.get(equalValue).ifPresent(tag -> predicateMap.put(equalValue, tag));
+                    tagManager.get(equalValue).ifPresent(tag -> nameToSnapshot.put(equalValue, tag));
                 }
 
                 if (predicate instanceof CompoundPredicate) {
@@ -257,13 +256,9 @@ public class TagsTable implements ReadonlyTable {
                                 name ->
                                         tagManager
                                                 .get(name)
-                                                .ifPresent(value -> predicateMap.put(name, value)));
+                                                .ifPresent(value -> nameToSnapshot.put(name, value)));
                     }
                 }
-            }
-
-            if (!predicateMap.isEmpty()) {
-                nameToSnapshot.putAll(predicateMap);
             } else {
                 for (Pair<Tag, String> tag : tagManager.tagObjects()) {
                     nameToSnapshot.put(tag.getValue(), tag.getKey());
