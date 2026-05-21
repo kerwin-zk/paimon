@@ -40,7 +40,8 @@ case class PaimonCreateTableLikeCommand(
     provider: Option[String],
     location: Option[String],
     properties: Map[String, String] = Map.empty,
-    ifNotExists: Boolean)
+    ifNotExists: Boolean,
+    fallbackCommand: Option[LeafRunnableCommand] = None)
   extends LeafRunnableCommand
   with Logging {
 
@@ -52,6 +53,10 @@ case class PaimonCreateTableLikeCommand(
     val targetProvider = normalizedProvider(
       provider.orElse(sourceProperties.get(TableCatalog.PROP_PROVIDER)),
       defaultTargetProvider)
+    if (shouldFallback(sourceProvider)) {
+      return fallbackCommand.get.run(sparkSession)
+    }
+
     val sourceSchema =
       CharVarcharUtils.getRawSchema(sourceTable.schema(), sparkSession.sessionState.conf)
     try {
@@ -65,6 +70,10 @@ case class PaimonCreateTableLikeCommand(
     }
 
     Seq.empty
+  }
+
+  private def shouldFallback(sourceProvider: String): Boolean = {
+    fallbackCommand.isDefined && provider.isEmpty && sourceProvider != defaultTargetProvider
   }
 
   private def buildCreateProperties(

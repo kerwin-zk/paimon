@@ -18,19 +18,24 @@
 
 package org.apache.spark.sql.catalyst.parser.extensions
 
+import org.apache.paimon.spark.SparkUtils
+import org.apache.paimon.spark.catalog.SparkBaseCatalog
 import org.apache.paimon.spark.catalyst.plans.logical
 import org.apache.paimon.spark.catalyst.plans.logical._
+import org.apache.paimon.spark.commands.PaimonCreateTableLikeCommand
 import org.apache.paimon.utils.TimeUtils
 
 import org.antlr.v4.runtime._
 import org.antlr.v4.runtime.misc.Interval
 import org.antlr.v4.runtime.tree.{ParseTree, TerminalNode}
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.PaimonSparkSession
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.parser.ParserInterface
 import org.apache.spark.sql.catalyst.parser.extensions.PaimonParserUtils.withOrigin
 import org.apache.spark.sql.catalyst.parser.extensions.PaimonSqlExtensionsParser._
 import org.apache.spark.sql.catalyst.plans.logical._
+import org.apache.spark.sql.connector.catalog.{Identifier => SparkIdentifier, TableCatalog}
 
 import scala.collection.JavaConverters._
 
@@ -98,6 +103,31 @@ class PaimonSqlExtensionsAstBuilder(delegate: ParserInterface)
     ShowTagsCommand(typedVisit[Seq[String]](ctx.multipartIdentifier))
   }
 
+  /** Create a CREATE TABLE LIKE logical command. */
+  override def visitCreateTableLike(ctx: CreateTableLikeContext): LogicalPlan = withOrigin(ctx) {
+    val (targetCatalog, targetIdent) = catalogAndIdentifier(typedVisit[Seq[String]](ctx.target))
+    val (sourceCatalog, sourceIdent) = catalogAndIdentifier(typedVisit[Seq[String]](ctx.source))
+    val provider = Option(ctx.tableProvider())
+      .map(provider => typedVisit[Seq[String]](provider.multipartIdentifier()).mkString("."))
+
+    targetCatalog match {
+      case paimonCatalog: SparkBaseCatalog =>
+        PaimonCreateTableLikeCommand(
+          paimonCatalog,
+          targetIdent,
+          sourceCatalog,
+          sourceIdent,
+          provider,
+          None,
+          Map.empty,
+          ctx.EXISTS() != null)
+      case catalog =>
+        throw new UnsupportedOperationException(
+          s"CREATE TABLE LIKE target table must be resolved from Paimon catalog: " +
+            s"${typedVisit[Seq[String]](ctx.target).mkString(".")}, catalog: ${catalog.name()}.")
+    }
+  }
+
   /** Create a CREATE OR REPLACE TAG logical command. */
   override def visitCreateOrReplaceTag(ctx: CreateOrReplaceTagContext): CreateOrReplaceTagCommand =
     withOrigin(ctx) {
@@ -156,6 +186,23 @@ class PaimonSqlExtensionsAstBuilder(delegate: ParserInterface)
   private def toBuffer[T](list: java.util.List[T]) = list.asScala
 
   private def toSeq[T](list: java.util.List[T]) = toBuffer(list)
+
+  private def catalogAndIdentifier(
+      identifier: Seq[String]): (TableCatalog, SparkIdentifier) = {
+    val spark = PaimonSparkSession.active
+    val catalogAndIdentifier = SparkUtils.catalogAndIdentifier(
+      spark,
+      identifier.asJava,
+      spark.sessionState.catalogManager.currentCatalog)
+
+    catalogAndIdentifier.catalog() match {
+      case catalog: TableCatalog => (catalog, catalogAndIdentifier.identifier())
+      case catalog =>
+        throw new UnsupportedOperationException(
+          s"CREATE TABLE LIKE table must be resolved from TableCatalog: " +
+            s"${identifier.mkString(".")}, catalog: ${catalog.name()}.")
+    }
+  }
 
   private def reconstructSqlString(ctx: ParserRuleContext): String = {
     toBuffer(ctx.children)

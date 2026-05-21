@@ -54,8 +54,8 @@ case class RewriteCreateTableLikeCommand(spark: SparkSession)
             createTableLikeCommand(c, targetCatalog, targetIdent)
           case CatalogAndIdentifier(targetCatalog: SparkGenericCatalog, targetIdent)
               if !usesHiveStorageSyntax(c.fileFormat) &&
-                c.provider.exists(SparkBaseCatalog.usePaimon) =>
-            createTableLikeCommand(c, targetCatalog, targetIdent)
+                c.provider.forall(SparkBaseCatalog.usePaimon) =>
+            createTableLikeCommand(c, targetCatalog, targetIdent, Some(c))
           case _ => c
         }
     }
@@ -64,7 +64,8 @@ case class RewriteCreateTableLikeCommand(spark: SparkSession)
   private def createTableLikeCommand(
       command: SparkCreateTableLikeCommand,
       targetCatalog: SparkBaseCatalog,
-      targetIdent: Identifier): LogicalPlan = {
+      targetIdent: Identifier,
+      fallbackCommand: Option[SparkCreateTableLikeCommand] = None): LogicalPlan = {
     toMultipartIdentifier(command.sourceTable) match {
       case CatalogAndIdentifier(sourceCatalog: TableCatalog, sourceIdent) =>
         PaimonCreateTableLikeCommand(
@@ -75,7 +76,8 @@ case class RewriteCreateTableLikeCommand(spark: SparkSession)
           command.provider,
           command.fileFormat.locationUri.map(_.toString),
           command.properties,
-          command.ifNotExists
+          command.ifNotExists,
+          fallbackCommand
         )
       case _ =>
         throw new UnsupportedOperationException(

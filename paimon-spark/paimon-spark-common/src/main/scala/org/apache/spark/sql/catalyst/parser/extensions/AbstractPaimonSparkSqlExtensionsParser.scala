@@ -122,7 +122,8 @@ abstract class AbstractPaimonSparkSqlExtensionsParser(val delegate: ParserInterf
       .replaceAll("/\\*.*?\\*/", " ")
       .replaceAll("`", "")
       .trim()
-    isPaimonProcedure(normalized) || isTagRefDdl(normalized)
+    isPaimonProcedure(normalized) || isTagRefDdl(normalized) ||
+      isCatalogCreateTableLike(normalized)
   }
 
   // All builtin paimon procedures are under the 'sys' namespace
@@ -138,6 +139,20 @@ abstract class AbstractPaimonSparkSqlExtensionsParser(val delegate: ParserInterf
         normalized.contains("replace tag") ||
         normalized.contains("rename tag") ||
         normalized.contains("delete tag")))
+  }
+
+  private def isCatalogCreateTableLike(normalized: String): Boolean = {
+    if (org.apache.spark.SPARK_VERSION < "3.4") {
+      return false
+    }
+
+    val createTableLikePattern =
+      "^create table (?:if not exists )?([^ ]+) like ([^ ]+)(?: using [^ ]+)?;?$".r
+    normalized match {
+      case createTableLikePattern(target, source) =>
+        target.count(_ == '.') >= 2 || source.count(_ == '.') >= 2
+      case _ => false
+    }
   }
 
   protected def parse[T](command: String)(toResult: PaimonSqlExtensionsParser => T): T = {

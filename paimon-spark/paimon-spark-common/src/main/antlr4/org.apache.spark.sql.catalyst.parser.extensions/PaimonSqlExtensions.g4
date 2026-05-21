@@ -74,7 +74,13 @@ statement
     | ALTER TABLE multipartIdentifier createReplaceTagClause                                #createOrReplaceTag
     | ALTER TABLE multipartIdentifier DELETE TAG (IF EXISTS)? identifier                    #deleteTag
     | ALTER TABLE multipartIdentifier RENAME TAG identifier TO identifier                   #renameTag
+    | CREATE TABLE (IF NOT EXISTS)? target=multipartIdentifier LIKE source=multipartIdentifier
+        tableProvider?                                                                      #createTableLike
   ;
+
+tableProvider
+    : USING multipartIdentifier
+    ;
 
 callArgument
     : expression                    #positionalArgument
@@ -151,8 +157,8 @@ quotedIdentifier
     ;
 
 nonReserved
-    : ALTER | AS | CALL | CREATE | DAYS | DELETE | EXISTS | HOURS | IF | NOT | OF | OR | TABLE
-    | REPLACE | RETAIN | VERSION | TAG
+    : ALTER | AS | CALL | CREATE | DAYS | DELETE | EXISTS | HOURS | IF | LIKE | NOT | OF | OR
+    | TABLE | REPLACE | RETAIN | USING | VERSION | TAG
     | TRUE | FALSE
     | MAP
     ;
@@ -166,6 +172,7 @@ DELETE: 'DELETE';
 EXISTS: 'EXISTS';
 HOURS: 'HOURS';
 IF : 'IF';
+LIKE: 'LIKE';
 MINUTES: 'MINUTES';
 NOT: 'NOT';
 OF: 'OF';
@@ -178,6 +185,7 @@ TABLE: 'TABLE';
 TAG: 'TAG';
 TAGS: 'TAGS';
 TO: 'TO';
+USING: 'USING';
 VERSION: 'VERSION';
 
 TRUE: 'TRUE';

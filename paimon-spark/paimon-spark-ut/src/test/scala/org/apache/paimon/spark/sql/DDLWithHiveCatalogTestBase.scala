@@ -657,7 +657,13 @@ abstract class DDLWithHiveCatalogTestBase extends PaimonHiveTestBase {
       spark.sql("CREATE DATABASE paimon_db")
       spark.sql("USE paimon_db")
 
-      withTable("paimon_source", "paimon_like", "csv_source", "csv_like", "csv_like_paimon") {
+      withTable(
+        "paimon_source",
+        "paimon_like",
+        "paimon_like_without_provider",
+        "csv_source",
+        "csv_like",
+        "csv_like_paimon") {
         spark.sql("""
                     |CREATE TABLE paimon_source (
                     |  id INT,
@@ -683,6 +689,24 @@ abstract class DDLWithHiveCatalogTestBase extends PaimonHiveTestBase {
         Assertions.assertEquals(List("id", "pt"), paimonLike.primaryKeys().asScala.toList)
         Assertions.assertEquals("4", paimonLike.options().get("bucket"))
         Assertions.assertEquals("128MB", paimonLike.options().get("target-file-size"))
+
+        spark.sql("CREATE TABLE paimon_like_without_provider LIKE paimon_source")
+
+        val paimonLikeWithoutProvider = loadTable("paimon_db", "paimon_like_without_provider")
+        Assertions.assertEquals(
+          spark.table("paimon_source").schema,
+          spark.table("paimon_like_without_provider").schema)
+        Assertions.assertEquals("paimon source comment", paimonLikeWithoutProvider.comment().get())
+        Assertions.assertEquals(
+          List("pt"),
+          paimonLikeWithoutProvider.partitionKeys().asScala.toList)
+        Assertions.assertEquals(
+          List("id", "pt"),
+          paimonLikeWithoutProvider.primaryKeys().asScala.toList)
+        Assertions.assertEquals("4", paimonLikeWithoutProvider.options().get("bucket"))
+        Assertions.assertEquals(
+          "128MB",
+          paimonLikeWithoutProvider.options().get("target-file-size"))
 
         spark.sql("""
                     |CREATE TABLE csv_source (
