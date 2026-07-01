@@ -22,6 +22,7 @@ import org.apache.paimon.CoreOptions.GlobalIndexColumnUpdateAction
 import org.apache.paimon.Snapshot
 import org.apache.paimon.data.BinaryRow
 import org.apache.paimon.format.blob.BlobFileFormat.isBlobFile
+import org.apache.paimon.globalindex.IndexedSplit
 import org.apache.paimon.index.GlobalIndexMeta
 import org.apache.paimon.io.{CompactIncrement, DataIncrement}
 import org.apache.paimon.manifest.IndexManifestEntry
@@ -34,7 +35,7 @@ import org.apache.paimon.spark.leafnode.PaimonLeafRunnableCommand
 import org.apache.paimon.spark.util.ScanPlanHelper.createNewScanPlan
 import org.apache.paimon.table.FileStoreTable
 import org.apache.paimon.table.sink.{CommitMessage, CommitMessageImpl}
-import org.apache.paimon.table.source.DataSplit
+import org.apache.paimon.table.source.{DataSplit, Split}
 import org.apache.paimon.table.source.snapshot.SnapshotReader
 import org.apache.paimon.types.DataTypeRoot.BLOB
 import org.apache.paimon.types.RowType
@@ -298,10 +299,10 @@ case class MergeIntoPaimonDataEvolutionTable(
       return tableSplits
     }
 
-    val sourceDss = persistSourceDss.getOrElse(createDataset(sparkSession, sourceTable))
-
     val firstRowIdsTouched = extractSourceRowIdMapping match {
       case Some(sourceRowIdAttr) =>
+        val sourceDss = persistSourceDss.getOrElse(createDataset(sparkSession, sourceTable))
+
         // Shortcut: Directly get _FIRST_ROW_IDs from the source table.
         findRelatedFirstRowIds(
           sourceDss,
@@ -311,8 +312,36 @@ case class MergeIntoPaimonDataEvolutionTable(
           sourceRowIdAttr.name).toSet
 
       case None =>
-        // Perform the full join to find related _FIRST_ROW_IDs.
-        val targetDss = createDataset(sparkSession, targetRelation)
+        val prunedTarget =
+          pruneTargetSplitsByMergeCondition(tableSplits, firstRowIds, firstRowIdToBlobFirstRowIds)
+        val targetDataSplits =
+          prunedTarget
+            .filter(pruned => dataFileCount(pruned.splits) < dataFileCount(tableSplits))
+            .map(_.splits)
+            .getOrElse(tableSplits)
+
+        prunedTarget match {
+          case Some(TargetPrunedSplits(splits, _)) if splits.isEmpty =>
+            return splits
+          case Some(TargetPrunedSplits(splits, true))
+              if dataFileCount(splits) < dataFileCount(tableSplits) =>
+            logInfo(
+              "Skip MergeInto target/source pruning join by using target-only condition on " +
+                s"data-evolution table ${table.name()}.")
+            return splits
+          case _ =>
+        }
+
+        // Perform the full join to find related _FIRST_ROW_IDs on the pruned target splits.
+        val sourceDss = persistSourceDss.getOrElse(createDataset(sparkSession, sourceTable))
+        val targetDss = createDataset(
+          sparkSession,
+          if (dataFileCount(targetDataSplits) == dataFileCount(tableSplits)) {
+            targetRelation
+          } else {
+            createNewScanPlan(targetDataSplits, targetRelation)
+          }
+        )
         findRelatedFirstRowIds(
           targetDss.alias("_left").join(sourceDss, toColumn(matchedCondition), "inner"),
           sparkSession,
@@ -322,13 +351,172 @@ case class MergeIntoPaimonDataEvolutionTable(
         ).toSet
     }
 
-    tableSplits
+    filterDataSplitsByFirstRowIds(tableSplits, firstRowIdsTouched)
+  }
+
+  private def pruneTargetSplitsByMergeCondition(
+      tableSplits: Seq[DataSplit],
+      firstRowIds: immutable.IndexedSeq[Long],
+      firstRowIdToBlobFirstRowIds: Map[Long, List[Long]]): Option[TargetPrunedSplits] = {
+    targetOnlyMergeCondition.flatMap {
+      targetCondition =>
+        convertConditionToPaimonPredicate(
+          targetCondition.condition,
+          targetRelation.output,
+          rowType,
+          ignorePartialFailure = true)
+          .map {
+            predicate =>
+              val candidateFirstRowIds = table
+                .newReadBuilder()
+                .withFilter(predicate)
+                .newScan()
+                .plan()
+                .splits()
+                .asScala
+                .flatMap(splitFirstRowIds(_, firstRowIds))
+                .flatMap(id => firstRowIdToBlobFirstRowIds.getOrElse(id, List(id)))
+                .toSet
+
+              val prunedSplits = filterDataSplitsByFirstRowIds(tableSplits, candidateFirstRowIds)
+              TargetPrunedSplits(prunedSplits, targetCondition.coversMergeCondition)
+          }
+    }
+  }
+
+  private def targetOnlyMergeCondition: Option[TargetOnlyMergeCondition] = {
+    val sourceConstants = sourceConstantExpressions(sourceTable)
+    val conjuncts = splitConjunctivePredicates(matchedCondition)
+    val targetConjuncts = conjuncts.flatMap {
+      conjunct =>
+        val rewritten = conjunct.transform {
+          case attr: AttributeReference if sourceConstants.contains(attr.exprId) =>
+            sourceConstants(attr.exprId)
+        }
+        if (isTargetFilter(rewritten)) {
+          Some(rewritten)
+        } else {
+          None
+        }
+    }
+
+    targetConjuncts.reduceOption(And).map {
+      condition => TargetOnlyMergeCondition(condition, targetConjuncts.size == conjuncts.size)
+    }
+  }
+
+  private def sourceConstantExpressions(plan: LogicalPlan): Map[ExprId, Literal] = {
+    plan match {
+      case SubqueryAlias(_, child) =>
+        sourceConstantExpressions(child)
+      case Project(projectList, child) if isOneRowPlan(child) =>
+        projectList.flatMap {
+          case alias @ Alias(child, _) if child.deterministic && child.foldable =>
+            Some(alias.toAttribute.exprId -> Literal.create(child.eval(), child.dataType))
+          case _ =>
+            None
+        }.toMap
+      case Project(projectList, child) =>
+        val childConstants = sourceConstantExpressions(child)
+        if (childConstants.isEmpty) {
+          Map.empty
+        } else {
+          projectList.flatMap {
+            case alias @ Alias(attr: AttributeReference, _)
+                if childConstants.contains(attr.exprId) =>
+              Some(alias.toAttribute.exprId -> childConstants(attr.exprId))
+            case attr: AttributeReference if childConstants.contains(attr.exprId) =>
+              Some(attr.exprId -> childConstants(attr.exprId))
+            case _ =>
+              None
+          }.toMap
+        }
+      case _ =>
+        Map.empty
+    }
+  }
+
+  private def isOneRowPlan(plan: LogicalPlan): Boolean = {
+    plan match {
+      case OneRowRelation() => true
+      case SubqueryAlias(_, child) => isOneRowPlan(child)
+      case Project(_, child) => isOneRowPlan(child)
+      case _ => false
+    }
+  }
+
+  private def isTargetFilter(expression: Expression): Boolean = {
+    expression.deterministic &&
+    expression.references.nonEmpty &&
+    canEvaluate(expression, targetTable) &&
+    canEvaluateWithinJoin(expression) &&
+    !SubqueryExpression.hasSubquery(expression) &&
+    expression.collect { case _: PythonUDF => true }.isEmpty
+  }
+
+  private def splitFirstRowIds(split: Split, firstRowIds: immutable.IndexedSeq[Long]): Seq[Long] = {
+    split match {
+      case indexedSplit: IndexedSplit =>
+        indexedSplit
+          .rowRanges()
+          .asScala
+          .flatMap(range => firstRowIdsInRange(firstRowIds, range.from, range.to))
+          .toSeq
+      case dataSplit: DataSplit =>
+        dataFileFirstRowIds(dataSplit)
+      case _ =>
+        Seq.empty
+    }
+  }
+
+  private def dataFileFirstRowIds(dataSplit: DataSplit): Seq[Long] = {
+    dataSplit
+      .dataFiles()
+      .asScala
+      .filter {
+        file =>
+          file.firstRowId() != null &&
+          !isBlobFile(file.fileName()) &&
+          !isVectorStoreFile(file.fileName())
+      }
+      .map(file => file.firstRowId().asInstanceOf[Long])
+      .toSeq
+  }
+
+  private def firstRowIdsInRange(
+      firstRowIds: immutable.IndexedSeq[Long],
+      from: Long,
+      to: Long): Seq[Long] = {
+    if (firstRowIds.isEmpty) {
+      Seq.empty
+    } else {
+      val fromIndex = floorIndex(firstRowIds, from)
+      val toIndex = floorIndex(firstRowIds, to)
+      firstRowIds.slice(fromIndex, toIndex + 1)
+    }
+  }
+
+  private def floorIndex(indexed: immutable.IndexedSeq[Long], value: Long): Int = {
+    indexed.search(value) match {
+      case Found(foundIndex) => foundIndex
+      case InsertionPoint(insertionIndex) => Math.max(0, insertionIndex - 1)
+    }
+  }
+
+  private def filterDataSplitsByFirstRowIds(
+      dataSplits: Seq[DataSplit],
+      firstRowIds: Set[Long]): Seq[DataSplit] = {
+    dataSplits
       .map(
         split =>
           split.filterDataFile(
-            file => file.firstRowId() != null && firstRowIdsTouched.contains(file.firstRowId())))
+            file => file.firstRowId() != null && firstRowIds.contains(file.firstRowId())))
       .filter(optional => optional.isPresent)
       .map(_.get())
+  }
+
+  private def dataFileCount(dataSplits: Seq[DataSplit]): Int = {
+    dataSplits.map(_.dataFiles().asScala.count(file => file.firstRowId() != null)).sum
   }
 
   private def updateActionInvoke(
@@ -819,6 +1007,10 @@ object MergeIntoPaimonDataEvolutionTable {
   final private val ROW_ID_NAME = "_ROW_ID"
   final private val FIRST_ROW_ID_NAME = "_FIRST_ROW_ID";
   final private val RAW_BLOB_PLACEHOLDER_MARKER_PREFIX = "__paimon_raw_blob_placeholder_"
+
+  private case class TargetOnlyMergeCondition(condition: Expression, coversMergeCondition: Boolean)
+
+  private case class TargetPrunedSplits(splits: Seq[DataSplit], coversMergeCondition: Boolean)
 
   private[commands] def isModifiedAssignment(assignment: Assignment): Boolean = {
     !sameAttributeReference(assignment.key, assignment.value)

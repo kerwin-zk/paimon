@@ -738,6 +738,46 @@ abstract class RowTrackingTestBase extends PaimonSparkTestBase with AdaptiveSpar
       }
   }
 
+  test("Data Evolution: merge into literal source prunes target files with global index") {
+    withSparkSQLConf("spark.paimon.data-evolution.merge-into.file-pruning" -> "true") {
+      withTable("target") {
+        sql("""
+              |CREATE TABLE target (id INT, name STRING, b INT)
+              |TBLPROPERTIES (
+              |  'bucket' = '-1',
+              |  'global-index.enabled' = 'true',
+              |  'global-index.row-count-per-shard' = '10000',
+              |  'row-tracking.enabled' = 'true',
+              |  'data-evolution.enabled' = 'true')
+              |""".stripMargin)
+        (0 until 5).foreach(i => sql(s"INSERT INTO target VALUES ($i, 'name_$i', $i)"))
+
+        val output = sql(
+          "CALL sys.create_global_index(table => 'test.target', index_column => 'name', " +
+            "index_type => 'btree', options => 'btree-index.records-per-range=1')").collect().head
+        assert(output.getBoolean(0))
+
+        executeMergeIntoAndAssertNoFilePruningJoin(
+          """
+            |MERGE INTO target
+            |USING (SELECT 'name_3' AS name, 300 AS b) source
+            |ON target.name = source.name
+            |WHEN MATCHED THEN UPDATE SET target.b = source.b
+            |""".stripMargin)
+
+        checkAnswer(
+          sql("SELECT id, name, b FROM target ORDER BY id"),
+          Seq(
+            Row(0, "name_0", 0),
+            Row(1, "name_1", 1),
+            Row(2, "name_2", 2),
+            Row(3, "name_3", 300),
+            Row(4, "name_4", 4))
+        )
+      }
+    }
+  }
+
   private def executeMergeIntoAndAssertFilePruning(mergeSql: String, filePruning: Boolean): Unit = {
     @volatile var hasTargetFilePruningJoin = false
     val listener = new QueryExecutionListener {
@@ -770,6 +810,35 @@ abstract class RowTrackingTestBase extends PaimonSparkTestBase with AdaptiveSpar
     if (filePruning) {
       assert(hasTargetFilePruningJoin, "Expected target file pruning join plan.")
     }
+  }
+
+  private def executeMergeIntoAndAssertNoFilePruningJoin(mergeSql: String): Unit = {
+    @volatile var hasTargetFilePruningJoin = false
+    val listener = new QueryExecutionListener {
+      override def onSuccess(funcName: String, qe: QueryExecution, durationNs: Long): Unit = {
+        checkPlan(qe.analyzed)
+      }
+
+      override def onFailure(funcName: String, qe: QueryExecution, exception: Exception): Unit = {
+        checkPlan(qe.analyzed)
+      }
+
+      private def checkPlan(plan: LogicalPlan): Unit = {
+        if (isTargetFilePruningJoinPlan(plan)) {
+          hasTargetFilePruningJoin = true
+        }
+      }
+    }
+
+    spark.listenerManager.register(listener)
+    try {
+      sql(mergeSql)
+      Utils.waitUntilEventEmpty(spark)
+    } finally {
+      spark.listenerManager.unregister(listener)
+    }
+
+    assert(!hasTargetFilePruningJoin, "Expected target file pruning join plan to be skipped.")
   }
 
   private def isTargetFilePruningJoinPlan(plan: LogicalPlan): Boolean = {
