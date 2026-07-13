@@ -18,9 +18,10 @@
 
 from pypaimon.daft.daft_paimon import explain_paimon_scan, read_paimon, write_paimon
 from pypaimon.daft.daft_blob_read import open_blob, read_blob
+from pypaimon.daft.daft_blob import blob_ref
 
 __all__ = ["explain_paimon_scan", "read_paimon", "write_paimon", "read_blob",
-           "open_blob", "PaimonCatalog", "PaimonTable"]
+           "open_blob", "blob_ref", "PaimonCatalog", "PaimonTable"]
 
 
 def __getattr__(name):

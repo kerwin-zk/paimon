@@ -47,6 +47,35 @@ def _deserialize_one(data: bytes) -> tuple[str, int, int]:
     return descriptor.uri, descriptor.offset, descriptor.length
 
 
+def blob_ref(uri, offset: int = 0, length: int = -1):
+    """Build a reference-blob column from a URI column for ``write_paimon``.
+
+    Returns a Daft expression that serializes each URI into a ``BlobDescriptor``
+    (the wire form ``write_paimon`` recognizes: on write, Paimon resolves the URI
+    and streams the external bytes into its own ``.blob`` storage, so the client
+    never materializes the blob payload). This is the write-side counterpart of
+    ``read_blob`` / ``open_blob``.
+
+    ``uri`` is a Daft expression or a column name. ``offset`` / ``length`` are
+    scalars applied to every row (default: the whole file, ``offset=0``,
+    ``length=-1``). Null URIs produce null cells.
+    """
+    import daft
+    from daft import DataType
+
+    if isinstance(uri, str):
+        uri = daft.col(uri)
+
+    @daft.func.batch(return_dtype=DataType.binary())
+    def _to_descriptors(uris):
+        return [
+            None if u is None else BlobDescriptor(u, offset, length).serialize()
+            for u in uris.to_arrow().to_pylist()
+        ]
+
+    return _to_descriptors(uri)
+
+
 def blob_column_to_file_array(column: pa.Array, io_config_bytes: bytes | None = None) -> pa.Array:
     """Convert a large_binary column of serialized BlobDescriptors to a File-compatible struct.
 
